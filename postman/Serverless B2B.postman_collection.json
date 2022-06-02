@@ -1,0 +1,35 @@
+{
+  "info": {
+    "_postman_id": "498086eb-7090-48e4-a140-829cb0ad43ee",
+    "name": "Serverless B2B",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+    "_exporter_id": "752706"
+  },
+  "item": [
+    {
+      "name": "Create Order",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "",
+            "value": "",
+            "type": "text",
+            "disabled": true
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": ""
+        },
+        "url": {
+          "raw": "https://your-api.execute-api.eu-west-1.amazonaws.com/prod/orders",
+          "protocol": "https",
+          "host": ["your-api", "execute-api", "eu-west-1", "amazonaws", "com"],
+          "path": ["prod", "orders"]
+        }
+      },
+      "response": []
+    }
+  ]
+}

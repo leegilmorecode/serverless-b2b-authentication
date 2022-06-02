@@ -1,92 +1,72 @@
 import * as apigw from "aws-cdk-lib/aws-apigateway";
-import * as appconfig from "aws-cdk-lib/aws-appconfig";
 import * as cdk from "aws-cdk-lib";
+import * as cr from "aws-cdk-lib/custom-resources";
 import * as dynamodb from "aws-cdk-lib/aws-dynamodb";
-import * as iam from "aws-cdk-lib/aws-iam";
+import * as events from "aws-cdk-lib/aws-events";
 import * as lambda from "aws-cdk-lib/aws-lambda";
 import * as nodeLambda from "aws-cdk-lib/aws-lambda-nodejs";
 import * as path from "path";
+import * as ssm from "aws-cdk-lib/aws-ssm";
+import * as targets from "aws-cdk-lib/aws-events-targets";
 
-import { RemovalPolicy, Stack } from "aws-cdk-lib";
+import { CfnOutput, Duration, RemovalPolicy, Stack } from "aws-cdk-lib";
 
 import { Construct } from "constructs";
 
 interface CustomerStackProps extends cdk.StackProps {
   tiresApi: string;
+  tiresApiKey: string;
+  ordersClientId: string;
+  ordersClientSecret: string;
+  cognitoAuthUrl: string;
+  orderStockScope: string;
 }
 
 export class CarCompanyStack extends Stack {
   constructor(scope: Construct, id: string, props?: CustomerStackProps) {
     super(scope, id, props);
 
-    if (!props?.env?.account || !props?.env?.region || !props?.tiresApi) {
+    if (
+      !props?.env?.account ||
+      !props?.env?.region ||
+      !props?.tiresApi ||
+      !props?.tiresApiKey ||
+      !props?.ordersClientId ||
+      !props?.ordersClientSecret ||
+      !props?.cognitoAuthUrl ||
+      !props?.orderStockScope
+    ) {
       throw new Error("props not fully supplied");
     }
 
-    // add the appconfig application for car orders
-    const configApplication: appconfig.CfnApplication =
-      new appconfig.CfnApplication(this, "AppConfigApplication", {
-        name: "CarOrdersConfigApplication",
-        description: "App Config Application for Car Orders",
-      });
-
-    const configEnviornment = new appconfig.CfnEnvironment(
-      this,
-      "AppConfigEnvironment",
-      {
-        applicationId: configApplication.ref,
-        name: "CarOrdersAppConfigEnvironment",
-        description: "App Config Enviornment for Car Orders",
-      }
-    );
-
-    const configProfile = new appconfig.CfnConfigurationProfile(
-      this,
-      "AppConfigProfile",
-      {
-        applicationId: configApplication.ref,
-        name: "CarOrdersAppConfigProfile",
-        description: "App Config profile for Car Orders",
-        locationUri: "hosted",
-      }
-    );
-
-    new appconfig.CfnHostedConfigurationVersion(
-      this,
-      "AppConfigConfigurationVersion",
-      {
-        applicationId: configApplication.ref,
-        configurationProfileId: configProfile.ref,
-        contentType: "application/json",
-        latestVersionNumber: 1,
-        content: JSON.stringify({ token: "none" }),
-      }
-    );
-
-    const configDeploymentStrategy = new appconfig.CfnDeploymentStrategy(
-      this,
-      "AppConfigDepStrategy",
-      {
-        deploymentDurationInMinutes: 0,
-        finalBakeTimeInMinutes: 0,
-        growthFactor: 100,
-        growthType: "LINEAR",
-        replicateTo: "NONE",
-        name: "CarOrdersAppConfigDepStrategy",
-        description: "Car orders app config deployment strategy",
-      }
-    );
-
-    new appconfig.CfnDeployment(this, "AppConfigDeployment", {
-      applicationId: configApplication.ref,
-      environmentId: configEnviornment.ref,
-      deploymentStrategyId: configDeploymentStrategy.ref,
-      configurationProfileId: configProfile.ref,
-      configurationVersion: "1",
-      description: "Car orders config deployment",
+    // create the api for the car orders
+    const ordersAPI: apigw.RestApi = new apigw.RestApi(this, "OrdersApi", {
+      description: "orders api",
+      restApiName: "orders-api",
+      deploy: true,
+      deployOptions: {
+        stageName: "prod",
+        dataTraceEnabled: true,
+        loggingLevel: apigw.MethodLoggingLevel.INFO,
+        tracingEnabled: true,
+        metricsEnabled: true,
+      },
     });
 
-    // create the orders table
+    // create the ssm value for the storing of the generated access token
+    const tokenParam: ssm.StringParameter = new ssm.StringParameter(
+      this,
+      "OrderStockToken",
+      {
+        parameterName: "/lambda/order-stock/token",
+        stringValue: JSON.stringify({ token: "" }),
+        description: "the access token for the order stock lambda",
+        type: ssm.ParameterType.STRING,
+        tier: ssm.ParameterTier.STANDARD,
+      }
+    );
+
+    // create the orders table for storing the car orders
     const ordersTable: dynamodb.Table = new dynamodb.Table(
       this,
       "CarOrdersTable",
@@ -104,64 +84,72 @@ export class CarCompanyStack extends Stack {
       }
     );
 
-    // lambda environment variables
-    const environment = {
+    const ordersStockEnvVars = {
+      SSM_ORDER_STOCK_TOKEN_PARAM: tokenParam.parameterName,
       TABLE: ordersTable.tableName,
-      // app config specific
-      AWS_APPCONFIG_EXTENSION_POLL_INTERVAL_SECONDS: "30",
-      AWS_APPCONFIG_EXTENSION_POLL_TIMEOUT_MILLIS: "3000",
-      AWS_APPCONFIG_EXTENSION_HTTP_PORT: "2772",
-      // application specific i.e. feature flag
-      ENVIRONMENT: configEnviornment.name,
-      APPLICATION: configApplication.name,
-      CONFIGURATION: configProfile.name,
-      // tires api details
       TIRES_API: props.tiresApi,
+      TIRES_API_KEY: props.tiresApiKey,
     };
-
-    // add the aws lambda layer extension for appconfig
-    const appConfigLambdaLayer = lambda.LayerVersion.fromLayerVersionArn(
-      this,
-      "AppConfigLayer",
-      "arn:aws:lambda:eu-west-1:434848589818:layer:AWS-AppConfig-Extension:69"
-    );
 
     // create the lambda handler to order stock
     const orderStockHandler: nodeLambda.NodejsFunction =
-      new nodeLambda.NodejsFunction(this, "orderStockHandler", {
+      new nodeLambda.NodejsFunction(this, "OrderStockHandler", {
         functionName: "order-stock-handler",
         runtime: lambda.Runtime.NODEJS_14_X,
         entry: path.join(__dirname, "/../src/order-stock/order-stock.ts"),
         memorySize: 1024,
         handler: "orderStockHandler",
-        layers: [appConfigLambdaLayer],
         bundling: {
           minify: true,
           externalModules: ["aws-sdk"],
         },
-        environment,
+        environment: {
+          ...ordersStockEnvVars,
+        },
       });
 
-    // create a policy statement for accessing app config
-    const appConfigPolicyStatement = new iam.PolicyStatement({
-      actions: [
-        "appconfig:GetLatestConfiguration",
-        "appconfig:StartConfigurationSession",
-      ],
-      resources: ["*"],
-      effect: iam.Effect.ALLOW,
+    // Lambda to generate a token on a CRON and push to ssm
+    const generateTokenHandler: nodeLambda.NodejsFunction =
+      new nodeLambda.NodejsFunction(this, "GenerateTokenHandler", {
+        functionName: "generate-token-handler",
+        runtime: lambda.Runtime.NODEJS_14_X,
+        entry: path.join(
+          __dirname,
+          "/../src/generate-token-cron/generate-token-cron.ts"
+        ),
+        memorySize: 1024,
+        handler: "generateTokenHandler",
+        bundling: {
+          minify: true,
+          externalModules: ["aws-sdk"],
+        },
+        environment: {
+          SSM_ORDER_STOCK_TOKEN_PARAM: tokenParam.parameterName,
+          ORDER_STOCK_SCOPE: props.orderStockScope,
+          AUTH_URL: props.cognitoAuthUrl,
+          ORDERS_CLIENT_ID: props.ordersClientId,
+          ORDERS_CLIENT_SECRET: props.ordersClientSecret,
+        },
+      });
+
+    // ensure there is a rule to run the lambda every hour for generating the new access token
+    const generateTokenRule = new events.Rule(this, "GenerateTokenRule", {
+      schedule: events.Schedule.rate(Duration.hours(1)),
     });
 
-    // allow the lambda to access the configuation in app config
-    orderStockHandler.role?.attachInlinePolicy(
-      new iam.Policy(this, "app-config-read-policy", {
-        statements: [appConfigPolicyStatement],
-      })
+    generateTokenRule.addTarget(
+      new targets.LambdaFunction(generateTokenHandler)
     );
 
-    // create the lambda handler for the webhook i.e. order complete
+    // allow the lambda to read the parameter from ssm
+    tokenParam.grantRead(orderStockHandler);
+
+    // allow the token generation lambda to write the token to ssm
+    tokenParam.grantWrite(generateTokenHandler);
+
+    // create the lambda handler for the webhook i.e. order complete (patch)
     const orderConfirmedWebhookHandler: nodeLambda.NodejsFunction =
-      new nodeLambda.NodejsFunction(this, "orderConfirmedWebhookHandler", {
+      new nodeLambda.NodejsFunction(this, "OrderConfirmedWebhookHandler", {
         functionName: "order-confirmed-webhook-handler",
         runtime: lambda.Runtime.NODEJS_14_X,
         entry: path.join(
@@ -174,30 +162,20 @@ export class CarCompanyStack extends Stack {
           minify: true,
           externalModules: ["aws-sdk"],
         },
-        environment,
+        environment: {
+          SSM_ORDER_STOCK_TOKEN_PARAM: tokenParam.parameterName,
+          TABLE: ordersTable.tableName,
+          TIRES_API: props.tiresApi,
+        },
       });
 
     // allow the lambdas to write to the table
     ordersTable.grantWriteData(orderConfirmedWebhookHandler);
     ordersTable.grantWriteData(orderStockHandler);
 
-    // create the api for the orders
-    const locationsAPI: apigw.RestApi = new apigw.RestApi(this, "OrdersApi", {
-      description: "orders api",
-      restApiName: "orders-api",
-      deploy: true,
-      deployOptions: {
-        stageName: "prod",
-        dataTraceEnabled: true,
-        loggingLevel: apigw.MethodLoggingLevel.INFO,
-        tracingEnabled: true,
-        metricsEnabled: true,
-      },
-    });
+    const orders: apigw.Resource = ordersAPI.root.addResource("orders");
 
-    const orders: apigw.Resource = locationsAPI.root.addResource("orders");
-
-    // add the endpoint for creating an order
+    // add the endpoint for creating an order (post) on /orders/
     orders.addMethod(
       "POST",
       new apigw.LambdaIntegration(orderStockHandler, {
@@ -206,8 +184,41 @@ export class CarCompanyStack extends Stack {
       })
     );
 
-    // add the endpoint for updating the order to state it is complete
-    const item = orders.addResource("{item}");
-    item.addMethod("PATCH");
+    // add the endpoint for updating the order to state it is complete i.e. (patch) on /orders/item
+    const item: apigw.Resource = orders.addResource("{item}");
+    item.addMethod(
+      "PATCH",
+      new apigw.LambdaIntegration(orderConfirmedWebhookHandler, {
+        proxy: true,
+        allowTestInvoke: true,
+      })
+    );
+
+    // Note: circular dependency fix for api url passed into the lambda integration as env var
+    new cr.AwsCustomResource(this, "UpdateEnvVars", {
+      onCreate: {
+        service: "Lambda",
+        action: "updateFunctionConfiguration",
+        parameters: {
+          FunctionName: orderStockHandler.functionArn,
+          Environment: {
+            Variables: {
+              CAR_API: ordersAPI.url,
+              ...ordersStockEnvVars, // ensure we pass through all required
+            },
+          },
+        },
+        physicalResourceId: cr.PhysicalResourceId.of("OrdersApi"),
+      },
+      policy: cr.AwsCustomResourcePolicy.fromSdkCalls({
+        resources: [orderStockHandler.functionArn],
+      }),
+    });
+
+    new CfnOutput(this, "ordersAPI", {
+      value: `${ordersAPI.url}orders`,
+      description: "The orders API",
+      exportName: "ordersAPI",
+    });
   }
 }

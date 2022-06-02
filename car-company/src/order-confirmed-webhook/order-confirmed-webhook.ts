@@ -8,8 +8,10 @@ import {
 
 import { v4 as uuid } from "uuid";
 
-// const dynamoDb = new AWS.DynamoDB.DocumentClient();
+const dynamoDb = new AWS.DynamoDB.DocumentClient();
 
+// this example lambda is invoked via a patch on the orders api by id, which updates the overall
+// car order to set the status to 'OrderCompleted' now that the tires have been provided.
 export const orderConfirmedWebhookHandler: APIGatewayProxyHandler = async (
   event: APIGatewayProxyEvent
 ): Promise<APIGatewayProxyResult> => {
@@ -20,15 +22,36 @@ export const orderConfirmedWebhookHandler: APIGatewayProxyHandler = async (
 
     console.log(`${prefix} - started`);
 
-    // const params: AWS.DynamoDB.DocumentClient.PutItemInput = {
-    //   TableName: process.env.TABLE as string,
-    //   Item: order,
-    // };
+    if (!event?.pathParameters?.item) throw new Error("id not passed in url");
+    if (!event?.body) throw new Error("no body passed in request");
 
-    // write the new car order to the table
-    // await dynamoDb.put(params).promise();
+    const { item } = event.pathParameters;
+    const body = JSON.parse(event.body);
 
-    // console.log(`response: ${JSON.stringify(order)}`);
+    console.log(`${prefix} - Car Order: ${item}`);
+    console.log(`${prefix} - Car event body: ${body}`);
+
+    // update the car order to state it is complete using the webhook
+    const params: AWS.DynamoDB.DocumentClient.UpdateItemInput = {
+      TableName: process.env.TABLE as string,
+      Key: {
+        id: item,
+      },
+      UpdateExpression: "SET #status = :status",
+      ConditionExpression: "attribute_exists(id)",
+      ExpressionAttributeValues: {
+        ":status": "OrderCompleted",
+      },
+      ExpressionAttributeNames: {
+        "#status": "status",
+      },
+      ReturnValues: "ALL_NEW",
+    };
+
+    // update the record in the table to status order completed
+    await dynamoDb.update(params).promise();
+
+    console.log(`${prefix} - Order completed for car Order: ${item}`);
 
     return {
       statusCode: 204,

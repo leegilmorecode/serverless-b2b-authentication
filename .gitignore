@@ -1,0 +1,4 @@
+.DS_Store
+car-company/cdk-outputs.json
+tires-company/cdk-outputs.json
+tires-company-dest/cdk-outputs.json
